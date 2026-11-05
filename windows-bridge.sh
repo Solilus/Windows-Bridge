@@ -9,6 +9,7 @@
 #     bash windows-bridge.sh run DATEI.exe   Windows-Programm (.exe/.msi/.bat) starten
 #     bash windows-bridge.sh steam-install   Windows-Steam installieren
 #     bash windows-bridge.sh steam           Windows-Steam starten
+#     bash windows-bridge.sh steam-modus 1|2|3  Anzeige-Modus für Steam (bei schwarzem Fenster)
 #     bash windows-bridge.sh dxvk an|aus     DirectX 10/11 über Vulkan/Metal (DXVK)
 #     bash windows-bridge.sh config          Wine-Einstellungen (winecfg)
 #     bash windows-bridge.sh laufwerk        Laufwerk C: im Finder öffnen
@@ -21,7 +22,7 @@
 # =============================================================================
 set -uo pipefail
 
-VERSION="1.1"
+VERSION="1.2"
 WINE_TAG="11.0_1"
 WINE_URL="https://github.com/Gcenx/macOS_Wine_builds/releases/download/${WINE_TAG}/wine-stable-${WINE_TAG}-osx64.tar.xz"
 DXVK_NAME="dxvk-macOS-async-v1.10.3-20230507-repack"
@@ -64,13 +65,14 @@ hinweis() {
 
 lade_einstellungen() {
   DXVK_AKTIV=0
+  STEAM_MODUS=1
   # shellcheck disable=SC1090
   [ -f "$CONF" ] && . "$CONF"
 }
 
 speichere_einstellungen() {
   mkdir -p "$BASE"
-  printf 'DXVK_AKTIV=%s\n' "$DXVK_AKTIV" > "$CONF"
+  printf 'DXVK_AKTIV=%s\nSTEAM_MODUS=%s\n' "$DXVK_AKTIV" "$STEAM_MODUS" > "$CONF"
 }
 
 wine_umgebung() {
@@ -81,7 +83,8 @@ wine_umgebung() {
   # Keine Startmenü-Verknüpfungen im Mac-System anlegen
   local ov="winemenubuilder.exe=d"
   if [ "$DXVK_AKTIV" = 1 ]; then
-    ov="$ov;d3d11,d3d10core=n,b"
+    # d3d11/d3d10core werden per Registry umgeleitet (siehe cmd_dxvk), damit
+    # Steams eingebauter Browser davon ausgenommen werden kann
     export DXVK_ASYNC=1
     export MVK_CONFIG_RESUME_LOST_DEVICE=1
   fi
@@ -227,11 +230,46 @@ cmd_steam() {
   exe="$(steam_exe)" || exit 1
   wine_umgebung
   export WINEDEBUG="fixme-all"   # Fehler im Protokoll behalten (für 'diagnose')
-  hinweis "Starte Steam (der erste Start mit Update dauert einige Minuten) …"
-  # -cef-disable-gpu: Steams eingebauter Browser läuft unter Wine sonst oft schwarz
-  "$WINE_BIN/wine" "$exe" -cef-disable-gpu -cef-disable-gpu-compositing \
+
+  # Steams Browser (steamwebhelper) immer mit Wines eigenem Direct3D, nie mit DXVK
+  local dll
+  for dll in d3d11 d3d10core dxgi; do
+    "$WINE_BIN/wine" reg add 'HKCU\Software\Wine\AppDefaults\steamwebhelper.exe\DllOverrides' \
+      /v "$dll" /d builtin /f >/dev/null 2>&1
+  done
+
+  # Anzeige-Modi – falls das Steam-Fenster schwarz bleibt, nächsten Modus probieren:
+  #  1 = Browser mit Grafikbeschleunigung (Standard)
+  #  2 = Browser ohne Grafikbeschleunigung
+  #  3 = wie 1, aber in einem festen Wine-Fenster („virtueller Desktop“)
+  local args=() vorne=()
+  case "$STEAM_MODUS" in
+    2) args=(-cef-disable-gpu -cef-disable-gpu-compositing) ;;
+    3) vorne=(explorer /desktop=Steam,1280x800) ;;
+    *) args=(-cef-in-process-gpu) ;;
+  esac
+  mkdir -p "$LOGS"
+  hinweis "Starte Steam im Anzeige-Modus $STEAM_MODUS (der erste Start dauert einige Minuten) …"
+  ( cd "$(dirname "$exe")" && "$WINE_BIN/wine" ${vorne[@]+"${vorne[@]}"} "$exe" ${args[@]+"${args[@]}"} ) \
     >"$LOGS/steam.log" 2>&1 &
   ok "Steam läuft. Protokoll: $LOGS/steam.log"
+  info "Bleibt das Fenster schwarz: bash windows-bridge.sh steam-modus $(( STEAM_MODUS % 3 + 1 ))"
+}
+
+cmd_steam_modus() {
+  pruefe_einrichtung
+  lade_einstellungen
+  local neu="${1:-}"
+  [ -n "$neu" ] || neu=$(( STEAM_MODUS % 3 + 1 ))
+  case "$neu" in 1|2|3) ;; *) fehler "Modus muss 1, 2 oder 3 sein." ;; esac
+  wine_umgebung
+  "$WINE_BIN/wineserver" -k 2>/dev/null
+  # Grafik-Zwischenspeicher von Steams Browser leeren (kann alte Fehler konservieren)
+  rm -rf "$PREFIX/drive_c/users/${USER:-$(id -un)}/AppData/Local/Steam/htmlcache/GPUCache" \
+         "$PREFIX/drive_c/users/${USER:-$(id -un)}/AppData/Local/Steam/htmlcache/ShaderCache" 2>/dev/null
+  STEAM_MODUS="$neu"; speichere_einstellungen
+  ok "Steam-Anzeige-Modus ist jetzt $neu. Starte Steam neu …"
+  cmd_steam
 }
 
 # ------------------------------------------------------------------ DXVK ---
@@ -249,10 +287,19 @@ cmd_dxvk() {
       fi
       cp "$quelle"/x64/*.dll "$PREFIX/drive_c/windows/system32/" || fehler "Kopieren fehlgeschlagen."
       cp "$quelle"/x32/*.dll "$PREFIX/drive_c/windows/syswow64/" || fehler "Kopieren fehlgeschlagen."
+      wine_umgebung
+      local dll
+      for dll in d3d11 d3d10core; do
+        "$WINE_BIN/wine" reg add 'HKCU\Software\Wine\DllOverrides' /v "$dll" /d native,builtin /f >/dev/null 2>&1
+      done
       DXVK_AKTIV=1; speichere_einstellungen
       ok "DXVK aktiv: DirectX-10/11-Spiele laufen jetzt über Vulkan → Metal."
       ;;
     aus|off)
+      wine_umgebung
+      for dll in d3d11 d3d10core; do
+        "$WINE_BIN/wine" reg delete 'HKCU\Software\Wine\DllOverrides' /v "$dll" /f >/dev/null 2>&1
+      done
       DXVK_AKTIV=0; speichere_einstellungen
       ok "DXVK deaktiviert (Wines eigene DirectX-Umsetzung wird genutzt)."
       ;;
@@ -339,7 +386,7 @@ cmd_gui() {
   fi
   local wahl
   wahl="$(osascript <<'EOF'
-set optionen to {"Windows-Programm starten …", "Steam starten", "DirectX-Beschleunigung (DXVK) an", "DirectX-Beschleunigung (DXVK) aus", "Laufwerk C: öffnen", "Wine-Einstellungen", "Alle Windows-Programme beenden"}
+set optionen to {"Windows-Programm starten …", "Steam starten", "Steam: anderen Anzeige-Modus probieren", "DirectX-Beschleunigung (DXVK) an", "DirectX-Beschleunigung (DXVK) aus", "Laufwerk C: öffnen", "Wine-Einstellungen", "Alle Windows-Programme beenden"}
 set r to choose from list optionen with title "Windows-Bridge" with prompt "Was möchtest du tun?" default items {item 1 of optionen}
 if r is false then return ""
 return item 1 of r
@@ -351,6 +398,7 @@ EOF
       datei="$(osascript -e 'POSIX path of (choose file with prompt "Windows-Programm (.exe, .msi, .bat) auswählen:")' 2>/dev/null)" || exit 0
       cmd_run "$datei" ;;
     "Steam starten")                       cmd_steam ;;
+    "Steam: anderen Anzeige-Modus probieren") cmd_steam_modus ;;
     "DirectX-Beschleunigung (DXVK) an")    cmd_dxvk an;  hinweis "DXVK ist jetzt an." ;;
     "DirectX-Beschleunigung (DXVK) aus")   cmd_dxvk aus; hinweis "DXVK ist jetzt aus." ;;
     "Laufwerk C: öffnen")                  cmd_laufwerk ;;
@@ -368,6 +416,7 @@ cmd_menue() {
   echo "  3) Windows-Programm starten"
   echo "  4) Steam installieren/starten"
   echo "  5) DXVK an/aus"
+  echo "  8) Steam: anderen Anzeige-Modus probieren"
   echo "  6) Laufwerk C: öffnen"
   echo "  7) Alles beenden"
   echo "  q) Ende"
@@ -381,6 +430,7 @@ cmd_menue() {
        cmd_run "$f" ;;
     4) cmd_steam ;;
     5) lade_einstellungen; [ "$DXVK_AKTIV" = 1 ] && cmd_dxvk aus || cmd_dxvk an ;;
+    8) cmd_steam_modus ;;
     6) cmd_laufwerk ;;
     7) cmd_stop ;;
     *) exit 0 ;;
@@ -394,6 +444,7 @@ case "${1:-}" in
   run|start)         shift; cmd_run "${1:-}" ;;
   steam-install)     cmd_steam_install ;;
   steam)             cmd_steam ;;
+  steam-modus)       shift; cmd_steam_modus "${1:-}" ;;
   dxvk)              shift; cmd_dxvk "${1:-}" ;;
   config|winecfg)    cmd_config ;;
   laufwerk|c)        cmd_laufwerk ;;
@@ -402,7 +453,7 @@ case "${1:-}" in
   diagnose|debug)    cmd_diagnose ;;
   gui)               cmd_gui ;;
   gui-run)           GUI=1; shift; cmd_run "${1:-}" ;;
-  -h|--help|hilfe)   sed -n '2,21p' "$0" ;;
+  -h|--help|hilfe)   sed -n '2,22p' "$0" ;;
   "")                cmd_menue ;;
   *)                 fehler "Unbekannter Befehl: $1 (Hilfe: bash windows-bridge.sh hilfe)" ;;
 esac
