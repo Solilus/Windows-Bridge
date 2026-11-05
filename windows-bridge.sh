@@ -23,12 +23,14 @@
 # =============================================================================
 set -uo pipefail
 
-VERSION="1.3"
+VERSION="1.4"
 WINE_TAG="11.0_1"
 WINE_URL="https://github.com/Gcenx/macOS_Wine_builds/releases/download/${WINE_TAG}/wine-stable-${WINE_TAG}-osx64.tar.xz"
 DXVK_NAME="dxvk-macOS-async-v1.10.3-20230507-repack"
 DXVK_URL="https://github.com/Gcenx/DXVK-macOS/releases/download/v1.10.3-20230507-repack/${DXVK_NAME}.tar.gz"
 STEAM_URL="https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe"
+WRAPPER_VERSION="1"
+WRAPPER_URL="https://raw.githubusercontent.com/Solilus/Windows-Bridge/main/wrapper/steamwebhelper.exe"
 
 BASE="$HOME/Library/Application Support/Windows-Bridge"
 WINE_DIR="$BASE/wine"
@@ -66,14 +68,14 @@ hinweis() {
 
 lade_einstellungen() {
   DXVK_AKTIV=0
-  STEAM_MODUS=1
+  STEAM_ANSICHT=1
   # shellcheck disable=SC1090
   [ -f "$CONF" ] && . "$CONF"
 }
 
 speichere_einstellungen() {
   mkdir -p "$BASE"
-  printf 'DXVK_AKTIV=%s\nSTEAM_MODUS=%s\n' "$DXVK_AKTIV" "$STEAM_MODUS" > "$CONF"
+  printf 'DXVK_AKTIV=%s\nSTEAM_ANSICHT=%s\n' "$DXVK_AKTIV" "$STEAM_ANSICHT" > "$CONF"
 }
 
 wine_umgebung() {
@@ -224,6 +226,33 @@ cmd_steam_install() {
   ok "Steam installiert. Starten mit: bash windows-bridge.sh steam"
 }
 
+# Wrapper gegen Steams schwarzes Fenster (Quelltext: wrapper/steamwebhelper-wrapper.c).
+# Er startet Steams eingebauten Browser mit --disable-gpu --single-process.
+steam_wrapper() {   # $1 = an | aus
+  local sdir wrapper d t r groesse
+  sdir="$(dirname "$(steam_exe)")"
+  wrapper="$CACHE/steamwebhelper-wrapper-$WRAPPER_VERSION.exe"
+  if [ "$1" = an ] && [ ! -s "$wrapper" ]; then
+    mkdir -p "$CACHE"
+    curl -fsSL -o "$wrapper.part" "$WRAPPER_URL" || { rm -f "$wrapper.part"; info "Wrapper-Download fehlgeschlagen."; return 1; }
+    if [ "$(head -c 2 "$wrapper.part")" != "MZ" ]; then rm -f "$wrapper.part"; info "Wrapper-Download ungültig."; return 1; fi
+    mv "$wrapper.part" "$wrapper"
+  fi
+  for d in "$sdir"/bin/cef/cef.win*; do
+    t="$d/steamwebhelper.exe"; r="$d/steamwebhelper_real.exe"
+    [ -f "$t" ] || continue
+    groesse=$(wc -c < "$t" | tr -d ' ')
+    if [ "$groesse" -gt 500000 ]; then
+      # Valves Original (neu installiert oder von einem Steam-Update erneuert) sichern
+      cp "$t" "$r" || return 1
+    elif [ ! -f "$r" ] || [ "$(wc -c < "$r" | tr -d ' ')" -le 500000 ]; then
+      info "Valves steamwebhelper.exe fehlt in $d – bitte 'steam-install' erneut ausführen."
+      return 1
+    fi
+    if [ "$1" = an ]; then cp "$wrapper" "$t"; else cp "$r" "$t"; fi
+  done
+}
+
 cmd_steam() {
   pruefe_einrichtung
   local exe
@@ -231,45 +260,56 @@ cmd_steam() {
   exe="$(steam_exe)" || exit 1
   wine_umgebung
   export WINEDEBUG="fixme-all"   # Fehler im Protokoll behalten (für 'diagnose')
+  # TLS über Wines eigene Krypto-DLLs, Steam-Overlay aus (hängt unter Wine oft)
+  export WINEDLLOVERRIDES="$WINEDLLOVERRIDES;bcrypt=b;ncrypt=b;gameoverlayrenderer,gameoverlayrenderer64=d"
 
-  # Steams Browser (steamwebhelper) immer mit Wines eigenem Direct3D, nie mit DXVK
-  local dll
-  for dll in d3d11 d3d10core dxgi; do
-    "$WINE_BIN/wine" reg add 'HKCU\Software\Wine\AppDefaults\steamwebhelper.exe\DllOverrides' \
-      /v "$dll" /d builtin /f >/dev/null 2>&1
+  if pgrep -qf 'steam\.exe' 2>/dev/null; then
+    hinweis "Steam läuft bereits."
+    return 0
+  fi
+
+  # Steams Browser immer mit Wines eigenem Direct3D, nie mit DXVK
+  local dll name
+  for name in steamwebhelper.exe steamwebhelper_real.exe; do
+    for dll in d3d11 d3d10core dxgi; do
+      "$WINE_BIN/wine" reg add "HKCU\\Software\\Wine\\AppDefaults\\$name\\DllOverrides" \
+        /v "$dll" /d builtin /f >/dev/null 2>&1
+    done
   done
 
-  # Anzeige-Modi – falls das Steam-Fenster schwarz bleibt, nächsten Modus probieren:
-  #  1 = Browser mit Grafikbeschleunigung (Standard)
-  #  2 = Browser ohne Grafikbeschleunigung
-  #  3 = wie 1, aber in einem festen Wine-Fenster („virtueller Desktop“)
-  local args=() vorne=()
-  case "$STEAM_MODUS" in
-    2) args=(-cef-disable-gpu -cef-disable-gpu-compositing) ;;
-    3) vorne=(explorer /desktop=Steam,1280x800) ;;
-    *) args=(-cef-in-process-gpu) ;;
+  # Ansichten – falls das Steam-Fenster schwarz bleibt, nächste probieren:
+  #  1 = Browser-Wrapper (Software-Zeichnen, ein Prozess)        – Standard
+  #  2 = wie 1, aber alles in einem festen Wine-Fenster (virtueller Desktop)
+  #  3 = ohne Wrapper, nur Steam-Optionen (alter Weg)
+  local args=(-no-cef-sandbox -cef-single-process -noverifyfiles) vorne=()
+  case "$STEAM_ANSICHT" in
+    3) steam_wrapper aus
+       args=(-cef-disable-gpu -cef-disable-gpu-compositing) ;;
+    2) steam_wrapper an || info "Starte ohne Wrapper."
+       vorne=(explorer /desktop=Steam,1280x800) ;;
+    *) steam_wrapper an || info "Starte ohne Wrapper." ;;
   esac
   mkdir -p "$LOGS"
-  hinweis "Starte Steam im Anzeige-Modus $STEAM_MODUS (der erste Start dauert einige Minuten) …"
+  hinweis "Starte Steam (Ansicht $STEAM_ANSICHT). Der erste Start dauert einige Minuten …"
   ( cd "$(dirname "$exe")" && "$WINE_BIN/wine" ${vorne[@]+"${vorne[@]}"} "$exe" ${args[@]+"${args[@]}"} ) \
     >"$LOGS/steam.log" 2>&1 &
   ok "Steam läuft. Protokoll: $LOGS/steam.log"
-  info "Bleibt das Fenster schwarz: bash windows-bridge.sh steam-modus $(( STEAM_MODUS % 3 + 1 ))"
+  info "Bleibt das Fenster schwarz: bash windows-bridge.sh steam-modus $(( STEAM_ANSICHT % 3 + 1 ))"
 }
 
 cmd_steam_modus() {
   pruefe_einrichtung
   lade_einstellungen
   local neu="${1:-}"
-  [ -n "$neu" ] || neu=$(( STEAM_MODUS % 3 + 1 ))
-  case "$neu" in 1|2|3) ;; *) fehler "Modus muss 1, 2 oder 3 sein." ;; esac
+  [ -n "$neu" ] || neu=$(( STEAM_ANSICHT % 3 + 1 ))
+  case "$neu" in 1|2|3) ;; *) fehler "Ansicht muss 1, 2 oder 3 sein." ;; esac
   wine_umgebung
-  "$WINE_BIN/wineserver" -k 2>/dev/null
+  "$WINE_BIN/wineserver" -k 2>/dev/null; "$WINE_BIN/wineserver" -w 2>/dev/null
   # Grafik-Zwischenspeicher von Steams Browser leeren (kann alte Fehler konservieren)
   rm -rf "$PREFIX/drive_c/users/${USER:-$(id -un)}/AppData/Local/Steam/htmlcache/GPUCache" \
          "$PREFIX/drive_c/users/${USER:-$(id -un)}/AppData/Local/Steam/htmlcache/ShaderCache" 2>/dev/null
-  STEAM_MODUS="$neu"; speichere_einstellungen
-  ok "Steam-Anzeige-Modus ist jetzt $neu. Starte Steam neu …"
+  STEAM_ANSICHT="$neu"; speichere_einstellungen
+  ok "Steam-Ansicht ist jetzt $neu. Starte Steam neu …"
   cmd_steam
 }
 
@@ -318,6 +358,7 @@ cmd_stop()     { wine_umgebung; "$WINE_BIN/wineserver" -k 2>/dev/null; ok "Alle 
 
 cmd_diagnose() {
   local bericht="$HOME/Desktop/windows-bridge-diagnose.txt"
+  lade_einstellungen
   info "Erstelle Diagnose (dauert ca. 1–2 Minuten, Steam wird dabei kurz gestartet) …"
   {
     echo "### Windows-Bridge $VERSION – Diagnose $(date)"
@@ -346,10 +387,12 @@ cmd_diagnose() {
     [ -f "$sdir/logs/stderr.txt" ] || { echo "--- stderr.txt (Steam-Ordner)"; tail -n 40 "$sdir/stderr.txt" 2>&1; }
     echo "### Steam-Teststart (90 Sekunden)"
     if [ -f "$sdir/steam.exe" ]; then
-      "$WINE_BIN/wineserver" -k 2>/dev/null
-      ( cd "$sdir" && "$WINE_BIN/wine" steam.exe -cef-disable-gpu -cef-disable-gpu-compositing ) \
-        >"$LOGS/steam-diagnose.log" 2>&1 &
+      "$WINE_BIN/wineserver" -k 2>/dev/null; "$WINE_BIN/wineserver" -w 2>/dev/null
+      echo "Ansicht: $STEAM_ANSICHT"
+      cmd_steam >/dev/null 2>&1
       sleep 90
+      cp "$LOGS/steam.log" "$LOGS/steam-diagnose.log" 2>/dev/null
+      echo "--- Wrapper-Dateien:"; ls -la "$sdir"/bin/cef/cef.win*/steamwebhelper*.exe 2>&1
       echo "--- laufende Windows-Prozesse:"
       ps -axo pid,etime,command | grep -iE 'steam|wine' | grep -v grep | cut -c1-200
       echo "--- Ausgabe:"

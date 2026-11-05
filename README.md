@@ -35,6 +35,20 @@ Danach liegt **Windows-Bridge.app** in `~/Applications` (Programme-Ordner deines
 
 Daten liegen in `~/Library/Application Support/Windows-Bridge`, Protokolle unter `logs/`.
 
+## Steam: schwarzes Fenster
+
+Steam zeichnet seine Oberfläche mit einem eingebauten Chromium-Browser, der unter Wine auf Apple Silicon schwarz bleibt. Windows-Bridge ersetzt deshalb Steams `steamwebhelper.exe` durch einen kleinen Wrapper (`wrapper/`). Der Wrapper startet das Original mit `--disable-gpu --single-process`. Nach jedem Steam-Update wird er automatisch neu eingesetzt.
+
+Falls das Fenster trotzdem schwarz bleibt, kannst du andere Ansichten probieren:
+
+| Befehl | Ansicht |
+|---|---|
+| `windows-bridge steam-modus 1` | Wrapper (Standard) |
+| `windows-bridge steam-modus 2` | Wrapper + Steam in einem festen Wine-Fenster |
+| `windows-bridge steam-modus 3` | ohne Wrapper (stellt Valves Original wieder her) |
+
+Den Wrapper kannst du aus `wrapper/steamwebhelper-wrapper.c` selbst bauen. Er basiert auf [notpop/steam-on-m1-wine](https://github.com/notpop/steam-on-m1-wine) (MIT-Lizenz).
+
 ## Grenzen
 
 - **DirectX 12** wird nicht unterstützt (dafür bräuchte es Apples D3DMetal, das nicht frei weitergegeben werden darf).
