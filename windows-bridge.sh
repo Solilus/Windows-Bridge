@@ -369,7 +369,7 @@ cmd_update() {
   # nach einer Änderung bis zu 5 Minuten lang noch die alte Version.
   local sha neu
   sha="$(curl -fsSL https://api.github.com/repos/Solilus/Windows-Bridge/commits/main \
-         | grep -m1 '"sha"' | sed -E 's/.*"sha": *"([0-9a-f]+)".*/\1/')"
+         | grep -o '"sha": *"[0-9a-f]\{40\}"' | head -n 1 | grep -o '[0-9a-f]\{40\}')"
   [ -n "$sha" ] || sha="main"
   neu="$(mktemp)"
   curl -fsSL -o "$neu" "https://raw.githubusercontent.com/Solilus/Windows-Bridge/$sha/windows-bridge.sh" \
