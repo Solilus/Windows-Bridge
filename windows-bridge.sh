@@ -23,7 +23,7 @@
 # =============================================================================
 set -uo pipefail
 
-VERSION="1.4"
+VERSION="1.5"
 WINE_TAG="11.0_1"
 WINE_URL="https://github.com/Gcenx/macOS_Wine_builds/releases/download/${WINE_TAG}/wine-stable-${WINE_TAG}-osx64.tar.xz"
 DXVK_NAME="dxvk-macOS-async-v1.10.3-20230507-repack"
@@ -183,6 +183,18 @@ APPLESCRIPT
   rm -rf "$APP_PATH"
   osacompile -o "$APP_PATH" "$tmp" || fehler "App konnte nicht erstellt werden."
   rm -f "$tmp"
+  # osacompile nennt das Programm in der App „droplet“ – macOS zeigt diesen Namen
+  # dann in Zugriffsabfragen an. Umbenennen, damit dort „Windows-Bridge“ steht.
+  local plist="$APP_PATH/Contents/Info.plist"
+  if [ -f "$APP_PATH/Contents/MacOS/droplet" ]; then
+    mv "$APP_PATH/Contents/MacOS/droplet" "$APP_PATH/Contents/MacOS/Windows-Bridge"
+    plutil -replace CFBundleExecutable -string "Windows-Bridge" "$plist"
+  fi
+  plutil -replace CFBundleName -string "Windows-Bridge" "$plist"
+  plutil -replace CFBundleDisplayName -string "Windows-Bridge" "$plist"
+  plutil -replace CFBundleIdentifier -string "com.solilus.windows-bridge" "$plist"
+  codesign --force --deep -s - "$APP_PATH" >/dev/null 2>&1 \
+    || info "Hinweis: App konnte nicht neu signiert werden."
   ok "App erstellt: $APP_PATH"
   info "Doppelklick öffnet das Menü. .exe-Dateien kannst du auf das App-Symbol ziehen"
   info "oder per Rechtsklick → Öffnen mit → Windows-Bridge starten."
