@@ -402,7 +402,7 @@ case "${1:-}" in
   diagnose|debug)    cmd_diagnose ;;
   gui)               cmd_gui ;;
   gui-run)           GUI=1; shift; cmd_run "${1:-}" ;;
-  -h|--help|hilfe)   sed -n '2,23p' "$0" ;;
+  -h|--help|hilfe)   sed -n '2,21p' "$0" ;;
   "")                cmd_menue ;;
   *)                 fehler "Unbekannter Befehl: $1 (Hilfe: bash windows-bridge.sh hilfe)" ;;
 esac
