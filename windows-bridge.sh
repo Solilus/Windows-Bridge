@@ -16,13 +16,14 @@
 #     bash windows-bridge.sh stop            Alle Windows-Programme beenden
 #     bash windows-bridge.sh entfernen       Alles in den Papierkorb legen
 #     bash windows-bridge.sh diagnose        Fehlerbericht auf den Schreibtisch legen
+#     bash windows-bridge.sh update          Neueste Version von GitHub holen
 #
 #  Die eigentliche Übersetzungsarbeit macht Wine (Open Source, LGPL) in den
 #  macOS-Builds von Gcenx; x86-Code übersetzt Apples Rosetta 2.
 # =============================================================================
 set -uo pipefail
 
-VERSION="1.2"
+VERSION="1.3"
 WINE_TAG="11.0_1"
 WINE_URL="https://github.com/Gcenx/macOS_Wine_builds/releases/download/${WINE_TAG}/wine-stable-${WINE_TAG}-osx64.tar.xz"
 DXVK_NAME="dxvk-macOS-async-v1.10.3-20230507-repack"
@@ -363,6 +364,22 @@ cmd_diagnose() {
   open -R "$bericht" 2>/dev/null
 }
 
+cmd_update() {
+  # Über die neueste Commit-ID laden – die normale raw-Adresse liefert
+  # nach einer Änderung bis zu 5 Minuten lang noch die alte Version.
+  local sha neu
+  sha="$(curl -fsSL https://api.github.com/repos/Solilus/Windows-Bridge/commits/main \
+         | grep -m1 '"sha"' | sed -E 's/.*"sha": *"([0-9a-f]+)".*/\1/')"
+  [ -n "$sha" ] || sha="main"
+  neu="$(mktemp)"
+  curl -fsSL -o "$neu" "https://raw.githubusercontent.com/Solilus/Windows-Bridge/$sha/windows-bridge.sh" \
+    || fehler "Update konnte nicht geladen werden."
+  bash -n "$neu" || fehler "Heruntergeladene Datei ist beschädigt – bitte später erneut versuchen."
+  mkdir -p "$BASE"
+  mv "$neu" "$SELF_COPY"; chmod +x "$SELF_COPY"
+  ok "Aktualisiert auf $(grep -m1 '^VERSION=' "$SELF_COPY" | cut -d'"' -f2) (${sha:0:7})."
+}
+
 cmd_entfernen() {
   [ -d "$BASE" ] || { ok "Nichts zu entfernen."; return 0; }
   printf 'Windows-Bridge samt Windows-Umgebung und allen darin installierten Programmen\n'
@@ -451,9 +468,10 @@ case "${1:-}" in
   stop)              cmd_stop ;;
   entfernen)         cmd_entfernen ;;
   diagnose|debug)    cmd_diagnose ;;
+  update)            cmd_update ;;
   gui)               cmd_gui ;;
   gui-run)           GUI=1; shift; cmd_run "${1:-}" ;;
-  -h|--help|hilfe)   sed -n '2,22p' "$0" ;;
+  -h|--help|hilfe)   sed -n '2,23p' "$0" ;;
   "")                cmd_menue ;;
   *)                 fehler "Unbekannter Befehl: $1 (Hilfe: bash windows-bridge.sh hilfe)" ;;
 esac
