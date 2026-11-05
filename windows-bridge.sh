@@ -14,13 +14,14 @@
 #     bash windows-bridge.sh laufwerk        Laufwerk C: im Finder öffnen
 #     bash windows-bridge.sh stop            Alle Windows-Programme beenden
 #     bash windows-bridge.sh entfernen       Alles in den Papierkorb legen
+#     bash windows-bridge.sh diagnose        Fehlerbericht auf den Schreibtisch legen
 #
 #  Die eigentliche Übersetzungsarbeit macht Wine (Open Source, LGPL) in den
 #  macOS-Builds von Gcenx; x86-Code übersetzt Apples Rosetta 2.
 # =============================================================================
 set -uo pipefail
 
-VERSION="1.0"
+VERSION="1.1"
 WINE_TAG="11.0_1"
 WINE_URL="https://github.com/Gcenx/macOS_Wine_builds/releases/download/${WINE_TAG}/wine-stable-${WINE_TAG}-osx64.tar.xz"
 DXVK_NAME="dxvk-macOS-async-v1.10.3-20230507-repack"
@@ -213,8 +214,8 @@ cmd_steam_install() {
   curl -fL --progress-bar -o "$CACHE/SteamSetup.exe" "$STEAM_URL" \
     || fehler "Steam-Installer konnte nicht geladen werden."
   hinweis "Installiere Steam …"
-  "$WINE_BIN/wine" "$CACHE/SteamSetup.exe" /S >"$LOGS/steam-install.log" 2>&1
-  "$WINE_BIN/wineserver" -w 2>/dev/null
+  # Kein 'wineserver -w' danach: startet der Installer Steam selbst, würde das ewig warten.
+  WINEDEBUG="fixme-all" "$WINE_BIN/wine" "$CACHE/SteamSetup.exe" /S >"$LOGS/steam-install.log" 2>&1
   steam_exe >/dev/null || fehler "Steam-Installation fehlgeschlagen. Details: $LOGS/steam-install.log"
   ok "Steam installiert. Starten mit: bash windows-bridge.sh steam"
 }
@@ -225,6 +226,7 @@ cmd_steam() {
   exe="$(steam_exe)" || cmd_steam_install
   exe="$(steam_exe)" || exit 1
   wine_umgebung
+  export WINEDEBUG="fixme-all"   # Fehler im Protokoll behalten (für 'diagnose')
   hinweis "Starte Steam (der erste Start mit Update dauert einige Minuten) …"
   # -cef-disable-gpu: Steams eingebauter Browser läuft unter Wine sonst oft schwarz
   "$WINE_BIN/wine" "$exe" -cef-disable-gpu -cef-disable-gpu-compositing \
@@ -265,6 +267,54 @@ cmd_dxvk() {
 cmd_config()   { pruefe_einrichtung; wine_umgebung; "$WINE_BIN/winecfg" >/dev/null 2>&1 & }
 cmd_laufwerk() { pruefe_einrichtung; open "$PREFIX/drive_c"; }
 cmd_stop()     { wine_umgebung; "$WINE_BIN/wineserver" -k 2>/dev/null; ok "Alle Windows-Programme beendet."; }
+
+cmd_diagnose() {
+  local bericht="$HOME/Desktop/windows-bridge-diagnose.txt"
+  info "Erstelle Diagnose (dauert ca. 1–2 Minuten, Steam wird dabei kurz gestartet) …"
+  {
+    echo "### Windows-Bridge $VERSION – Diagnose $(date)"
+    echo "### System"; sw_vers 2>&1; echo "Chip: $(uname -m)"; sysctl -n machdep.cpu.brand_string 2>&1
+    if arch -x86_64 /usr/bin/true 2>/dev/null; then echo "Rosetta: OK"; else echo "Rosetta: FEHLT"; fi
+    echo "### Ordner"; ls -la "$BASE" 2>&1
+    echo "### Wine"
+    ls -la "$WINE_BIN/wine" 2>&1
+    xattr -l "$WINE_APP" 2>&1 | head -5
+    file "$WINE_BIN/wine" "$WINE_BIN/wineserver" 2>&1
+    export WINEPREFIX="$PREFIX" WINEDEBUG="fixme-all"
+    echo "--- wine --version"; "$WINE_BIN/wine" --version 2>&1
+    echo "--- Testprogramm (cmd /c ver)"
+    "$WINE_BIN/wine" cmd /c ver 2>&1 | tail -n 20
+    echo "### Windows-Umgebung"; ls "$PREFIX" "$PREFIX/drive_c" 2>&1
+    echo "### Steam-Dateien"
+    local sdir="$PREFIX/drive_c/Program Files (x86)/Steam"
+    ls -la "$sdir" 2>&1 | head -40
+    echo "### Steam-Installer-Protokoll"; tail -n 60 "$LOGS/steam-install.log" 2>&1
+    echo "### Letztes Steam-Protokoll"; tail -n 80 "$LOGS/steam.log" 2>&1
+    echo "### Steam-eigene Logs"
+    local f
+    for f in bootstrap_log.txt webhelper.txt cef_log.txt connection_log.txt stderr.txt; do
+      [ -f "$sdir/logs/$f" ] && { echo "--- $f"; tail -n 40 "$sdir/logs/$f"; }
+    done
+    [ -f "$sdir/logs/stderr.txt" ] || { echo "--- stderr.txt (Steam-Ordner)"; tail -n 40 "$sdir/stderr.txt" 2>&1; }
+    echo "### Steam-Teststart (90 Sekunden)"
+    if [ -f "$sdir/steam.exe" ]; then
+      "$WINE_BIN/wineserver" -k 2>/dev/null
+      ( cd "$sdir" && "$WINE_BIN/wine" steam.exe -cef-disable-gpu -cef-disable-gpu-compositing ) \
+        >"$LOGS/steam-diagnose.log" 2>&1 &
+      sleep 90
+      echo "--- laufende Windows-Prozesse:"
+      ps -axo pid,etime,command | grep -iE 'steam|wine' | grep -v grep | cut -c1-200
+      echo "--- Ausgabe:"
+      grep -v '^$' "$LOGS/steam-diagnose.log" | tail -n 120
+    else
+      echo "steam.exe nicht vorhanden – Steam ist nicht installiert."
+    fi
+  } >"$bericht" 2>&1
+  pbcopy <"$bericht" 2>/dev/null
+  ok "Diagnose gespeichert: $bericht (auch in der Zwischenablage)."
+  info "Steam läuft eventuell noch. Beenden mit: bash windows-bridge.sh stop"
+  open -R "$bericht" 2>/dev/null
+}
 
 cmd_entfernen() {
   [ -d "$BASE" ] || { ok "Nichts zu entfernen."; return 0; }
@@ -349,9 +399,10 @@ case "${1:-}" in
   laufwerk|c)        cmd_laufwerk ;;
   stop)              cmd_stop ;;
   entfernen)         cmd_entfernen ;;
+  diagnose|debug)    cmd_diagnose ;;
   gui)               cmd_gui ;;
   gui-run)           GUI=1; shift; cmd_run "${1:-}" ;;
-  -h|--help|hilfe)   sed -n '2,22p' "$0" ;;
+  -h|--help|hilfe)   sed -n '2,23p' "$0" ;;
   "")                cmd_menue ;;
   *)                 fehler "Unbekannter Befehl: $1 (Hilfe: bash windows-bridge.sh hilfe)" ;;
 esac
